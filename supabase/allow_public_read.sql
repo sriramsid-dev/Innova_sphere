@@ -1,0 +1,9 @@
+-- ============================================================================
+-- DEPRECATED / DO NOT EXECUTE
+--
+-- The existing RLS policy on public.schemes already protects records properly
+-- by enforcing: verification_status = 'verified'.
+--
+-- Do NOT execute this file. Use supabase/verify_schemes.sql instead to mark
+-- verified scheme records as 'verified'.
+-- ============================================================================
