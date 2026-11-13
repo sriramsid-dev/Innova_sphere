@@ -25,18 +25,21 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
-// Allow localhost origins used by Vite dev server
+// Allow localhost origins (dev) + the production frontend URL (Vercel)
 const ALLOWED_ORIGIN_REGEX = /^http:\/\/localhost(:\d+)?$/;
+const FRONTEND_URL = process.env.FRONTEND_URL?.replace(/\/+$/, ""); // trim trailing slashes
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (curl, Postman, same-origin) during dev
-      if (!origin || ALLOWED_ORIGIN_REGEX.test(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error(`CORS: origin ${origin} not allowed`));
-      }
+      // Allow requests with no origin (curl, Postman, same-origin)
+      if (!origin) return callback(null, true);
+      // Allow any localhost origin (Vite dev server)
+      if (ALLOWED_ORIGIN_REGEX.test(origin)) return callback(null, true);
+      // Allow the configured production frontend URL
+      if (FRONTEND_URL && origin === FRONTEND_URL) return callback(null, true);
+      // Reject everything else — never fall back to wildcard
+      callback(new Error(`CORS: origin ${origin} not allowed`));
     },
     methods: ["POST", "GET", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
@@ -79,5 +82,6 @@ app.listen(PORT, () => {
   const modelName = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
   console.log(`\n🌿 Innova Sphere API server running on http://localhost:${PORT}`);
   console.log(`   Gemini:   ${process.env.GEMINI_API_KEY ? `✅ configured (${modelName})` : "❌ GEMINI_API_KEY not set"}`);
-  console.log(`   Supabase: ${process.env.SUPABASE_URL ? "✅ configured" : "❌ SUPABASE_URL not set"}\n`);
+  console.log(`   Supabase: ${process.env.SUPABASE_URL ? "✅ configured" : "❌ SUPABASE_URL not set"}`);
+  console.log(`   CORS:     ${FRONTEND_URL ? `✅ production origin: ${FRONTEND_URL}` : "⚠️  FRONTEND_URL not set (localhost only)"}\n`);
 });
