@@ -1,0 +1,9 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "https://innova-sphere-e36q.onrender.com/api/$1"
+    }
+  ]
+}
+
