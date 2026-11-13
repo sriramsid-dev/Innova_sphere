@@ -118,6 +118,8 @@ function normaliseRow(row) {
     authorityEn: row.authority || row.authority_en || "Government of India",
     authorityTe: row.authority_te || "భారత ప్రభుత్వం",
     tags: toArray(row.tags),
+    // Optional: only present when the table has an alias column. Never assumed.
+    aliases: toArray(row.aliases || row.aliases_en || row.alias),
     _source: "live",
 
     en: {
@@ -419,130 +421,767 @@ function cleanText(str) {
 const STRONG_AGRIC_RE =
   /\bkisan\b|\bfarmer\w*\b|\bfarming\b|\bagricultur\w*\b|\bcultivat\w*\b|\bcrop\w*\b|\bharvest\w*\b|\bsow\w*\b|\bsoil\b|\bfertili[sz]\w*\b|\bpesticide\w*\b|\bpatta\b|\bland[\s-]?record\w*\b|\blandhold\w*\b|\brainfall\b|\brythu\b|\braitu\b|\bnela\b|\bpanta\b|రైతు|పంట|వ్యవసాయ|భూమి|నేల|ఎరువు|సాగు/iu;
 
+// ── Matching primitives ─────────────────────────────────────────────────────
+
+/** Zero-width characters, e.g. the ZWNJ inside "కిసాన్‌కు". */
+const ZERO_WIDTH_RE = /[\u200B-\u200D\uFEFF]/g;
+
 /**
- * Per-scheme matchers. `strong` (explicit scheme identifiers) is sufficient on
- * its own. `generic` (broad topic words) only counts when STRONG_AGRIC_RE is
- * also present; `translit` (Romanised Telugu spellings) counts with agriculture
- * context. KCC and PACS have separate keyword sets so they no longer tie on the
- * same phrase ("credit card" previously matched both and PACS won by order).
+ * Normalise text for matching: lowercase, strip zero-width characters, and
+ * reduce every run of punctuation/symbols to a single space. Keeps Latin and
+ * Telugu letters intact — \p{M} is required because Telugu vowel signs and
+ * other combining marks are marks, not letters; dropping them would shatter
+ * every Telugu word into single characters.
  */
-const SCHEME_MATCHERS = {
-  "pm-kisan": {
-    strong: /pm[\s-]?kisan|pmkisan|kisan[\s-]?samman|samman[\s-]?nidhi|\b6[\s,]?000\b|పీఎం[\s-]?కిసాన్|పీఎంఎఫ్|కిసాన్[\s-]?సమ్మాన్/iu,
-    generic: /income[\s-]?support|direct[\s-]?benefit|rythu[\s-]?bharos\w*|pattadar|రైతు[\s-]?బంధు|పట్టాదారు|ఆదాయ[\s-]?మద్దతు/iu,
-  },
-  pmfby: {
-    strong: /pmfby|fasal[\s-]?bima|crop[\s-]?insurance|panta[\s-]?(?:bima|bheema)|bheema|ఫసల్[\s-]?బీమా|పంట[\s-]?బీమా/iu,
-    generic: /\binsurance\b|\bbima\b|weather[\s-]?damage|drought|flood|crop[\s-]?loss|నష్టం|కరువు|వరదలు|వరి[\s-]?బీమా/iu,
-    translit: /\bbheema\b/iu,
-  },
-  "kisan-credit-card": {
-    strong: /\bkcc\b|kisan[\s-]?credit[\s-]?card|క్రెడిట్[\s-]?కార్డు|కిసాన్[\s-]?క్రెడిట్/iu,
-    generic: /\bcrop[\s-]?loan\b|\bcredit[\s-]?card\b|\brunam\b|రుణం|పంట[\s-]?రుణం/iu,
-    translit: /\b(?:rythu|raitu|raithu)[\s-]?runam\b|\brunam\b/iu,
-  },
-  "pacs-coop-credit": {
-    strong: /\bpacs\b|cooperative[\s-]?(?:credit|loan|bank|society)|సహకార/iu,
-    generic: /cooperative|storage|fertiliz|fertili[sz]|గిడ్డంగి|ఎరువు|సహకారి/iu,
-    translit: /\bsahakara\b/iu,
-  },
-  "soil-health-card": {
-    strong: /soil[\s-]?health[\s-]?card|soil[\s-]?card|నేల[\s-]?ఆరోగ్య|సాయిల్[\s-]?హెల్త్/iu,
-    generic: /\bsoil\b|soil[\s-]?test|fertilizer[\s-]?test|నేల|సాయిల్/iu,
-    translit: /\bnela[\s-]?pariksham\b|\bnela[\s-]?arogyam\b|\bbhoomi[\s-]?pariksham\b/iu,
-  },
+function normaliseForMatch(value) {
+  return String(value || "")
+    .replace(ZERO_WIDTH_RE, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, " ")
+    .trim();
+}
+
+/** Function / structural words that carry no scheme identity. */
+const MATCH_STOPWORDS = new Set([
+  // English
+  "a", "an", "the", "of", "for", "and", "or", "to", "in", "on", "at", "by",
+  "with", "from", "is", "are", "am", "was", "were", "be", "my", "our", "me",
+  "i", "we", "you", "your", "it", "its", "this", "that", "these", "those",
+  "what", "which", "who", "whom", "whose", "how", "why", "when", "where",
+  "tell", "give", "show", "explain", "about", "please", "can", "could", "would",
+  "should", "do", "does", "did", "want", "need", "know", "more", "details",
+  "detail", "information", "info", "full", "complete", "scheme", "schemes",
+  "yojana", "yojna", "government", "govt", "official",
+  // Telugu
+  "గురించి", "ఏమిటి", "ఏమి", "చెప్పండి", "చెప్పు", "దయచేసి", "కొరకు", "మరియు",
+  "ఇంకా", "నేను", "మీ", "మీరు", "ఈ", "ఆ", "ఇది", "అది", "ఎలా", "లో", "ఏ", "ఏది",
+  "వివరాలు", "వివరంగా", "పథకం", "పథకాలు", "ప్రభుత్వ", "అధికారిక",
+]);
+
+/**
+ * Symmetric, tolerant token comparison: exact equality, or one token being a
+ * prefix of the other with a comparable length. The prefix rule absorbs Telugu
+ * case endings ("కిసాన్‌కు" → "కిసాన్") and English plurals ("farmers").
+ */
+function tokenMatches(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.length < 3 || b.length < 3) return false;
+  const [shortToken, longToken] = a.length <= b.length ? [a, b] : [b, a];
+  return longToken.startsWith(shortToken) && shortToken.length / longToken.length >= 0.6;
+}
+
+/**
+ * Romanised Telugu → Telugu script. A language resource (not scheme data): it
+ * lets a spoken query such as "panta bima" reach records that only carry
+ * Telugu names, and vice versa.
+ */
+const ROMANISED_TELUGU = {
+  panta: "పంట",
+  bima: "బీమా",
+  bheema: "బీమా",
+  beema: "బీమా",
+  fasal: "ఫసల్",
+  nela: "నేల",
+  bhoomi: "భూమి",
+  bhumi: "భూమి",
+  pariksham: "పరీక్ష",
+  arogyam: "ఆరోగ్యం",
+  runam: "రుణం",
+  runalu: "రుణాలు",
+  rythu: "రైతు",
+  raitu: "రైతు",
+  raithu: "రైతు",
+  sahakara: "సహకార",
+  pattadar: "పట్టాదారు",
+  pattadhar: "పట్టాదారు",
+  kisan: "కిసాన్",
+  kisaan: "కిసాన్",
+  samman: "సమ్మాన్",
+  nidhi: "నిధి",
+  bharosa: "భరోసా",
 };
+
+/** Spoken abbreviations that stand for several words. */
+const TELUGU_ABBREVIATIONS = {
+  "పీఎం": ["ప్రధాన", "మంత్రి"],
+};
+
+/**
+ * Concept lexicon — scheme-agnostic topic words, including Telugu and
+ * transliterations. A concept only ever adds *weak* evidence, and only when a
+ * record claims the same concept through its own name, slug, code or tags. No
+ * scheme id, name or alias is listed here.
+ */
+const CONCEPTS = {
+  income_support: ["income support", "direct benefit", "samman nidhi", "కిసాన్ సమ్మాన్", "సమ్మాన్ నిధి"],
+  crop_insurance: ["insurance", "bima", "bheema", "fasal", "బీమా", "ఫసల్", "పంట బీమా", "crop loss", "drought", "flood", "నష్టం", "కరువు", "వరదలు"],
+  credit_card: ["credit card", "kcc", "క్రెడిట్ కార్డు", "కిసాన్ క్రెడిట్"],
+  credit: ["loan", "credit", "runam", "రుణం", "రుణ"],
+  cooperative: ["cooperative", "pacs", "sahakara", "సహకార", "గిడ్డంగి", "warehouse", "storage"],
+  soil: ["soil", "nela", "నేల", "సాయిల్", "pariksham", "అరోగ్యం", "ఆరోగ్యం"],
+};
+
+/** Concept id → set of its word tokens (built once). */
+const CONCEPT_TOKENS = Object.fromEntries(
+  Object.entries(CONCEPTS).map(([conceptId, phrases]) => [
+    conceptId,
+    new Set(phrases.flatMap((phrase) => normaliseForMatch(phrase).split(" ")).filter(Boolean)),
+  ])
+);
+
+/**
+ * Consumer-finance words. "credit", "card" and "loan" describe a bank product
+ * before they describe a farm scheme, so on their own they must never select a
+ * record — that is what the agriculture-context gate is for.
+ */
+const CONSUMER_FINANCE_TOKENS = new Set([
+  ...CONCEPT_TOKENS.credit,
+  ...CONCEPT_TOKENS.credit_card,
+]);
+
+// ── Query / record preparation ──────────────────────────────────────────────
+
+/** True when a phrase from the concept lexicon appears in the query. */
+function phraseInQuery(query, phrase) {
+  const normalised = normaliseForMatch(phrase);
+  if (!normalised) return false;
+  if (normalised.includes(" ")) return query.text.includes(normalised);
+  return query.tokens.some((token) => tokenMatches(token, normalised));
+}
+
+/**
+ * Prepare the user's message once: normalised text, expanded token sequence
+ * (transliterations and abbreviations), a compact form for code matching, and
+ * the concepts the message asks about.
+ */
+function buildQuery(text) {
+  const normalised = normaliseForMatch(text);
+  const rawTokens = normalised ? normalised.split(" ") : [];
+
+  // Two parallel token sequences, both keeping word order intact so that
+  // consecutive name words can still be matched as a run:
+  //   sequence      — original words, with spoken abbreviations expanded in place
+  //   transliterated — Latin words mapped to Telugu script in place
+  const sequence = [];
+  const transliterated = [];
+  for (const token of rawTokens) {
+    const expansion = TELUGU_ABBREVIATIONS[token];
+    if (expansion) {
+      sequence.push(...expansion);
+      transliterated.push(...expansion);
+      continue;
+    }
+    sequence.push(token);
+    transliterated.push(ROMANISED_TELUGU[token] || token);
+  }
+
+  const query = {
+    text: normalised,
+    sequence,
+    transliterated,
+    tokens: [...new Set([...sequence, ...transliterated])],
+    compact: normalised.replace(/ /g, ""),
+    askedConcepts: new Set(),
+  };
+
+  for (const [conceptId, phrases] of Object.entries(CONCEPTS)) {
+    if (phrases.some((phrase) => phraseInQuery(query, phrase))) query.askedConcepts.add(conceptId);
+  }
+
+  return query;
+}
+
+/**
+ * Longest run of consecutive query tokens that matches consecutive identity
+ * tokens, plus the identity tokens it matched.
+ */
+function longestRun(identityTokens, queryTokens) {
+  let best = { length: 0, tokens: [] };
+  for (let i = 0; i < identityTokens.length; i++) {
+    for (let j = 0; j < queryTokens.length; j++) {
+      let k = 0;
+      while (
+        i + k < identityTokens.length &&
+        j + k < queryTokens.length &&
+        tokenMatches(queryTokens[j + k], identityTokens[i + k])
+      ) {
+        k += 1;
+      }
+      if (k > best.length) best = { length: k, tokens: identityTokens.slice(i, i + k) };
+    }
+  }
+  return best;
+}
+
+/**
+ * Build the searchable identity of one scheme from its own record fields: code,
+ * slug, English/Telugu names, optional aliases and tags. Any field that is
+ * absent is simply skipped — nothing is assumed about the schema.
+ */
+function buildSchemeIdentity(scheme, lang = "en") {
+  const names = [];
+  const pushName = (value) => {
+    if (typeof value === "string" && value.trim()) names.push(value.trim());
+  };
+
+  // Prefer the active language, but always index both names for recall.
+  for (const key of lang === "te" ? ["te", "en"] : ["en", "te"]) pushName(scheme?.[key]?.name);
+  pushName(scheme?.name);
+  pushName(scheme?.name_te);
+
+  // Aliases are optional in the schema; use them only when the row provides them.
+  const aliases = [];
+  for (const source of [scheme?.aliases, scheme?.en?.aliases, scheme?.te?.aliases]) {
+    if (!Array.isArray(source)) continue;
+    for (const alias of source) {
+      if (typeof alias !== "string" || !alias.trim()) continue;
+      aliases.push(alias.trim());
+      pushName(alias);
+    }
+  }
+
+  // Codes, slug and aliases all behave as short identifiers ("kcc", "pmjay").
+  const codes = [];
+  for (const value of [scheme?.code, scheme?.slug, scheme?.id, ...aliases]) {
+    const normalised = normaliseForMatch(value);
+    if (normalised) codes.push(normalised);
+  }
+
+  const tagPhrases = (Array.isArray(scheme?.tags) ? scheme.tags : [])
+    .filter((tag) => typeof tag === "string" && tag.trim())
+    .map((tag) => normaliseForMatch(tag.replace(/[_-]+/g, " ")));
+
+  const slug = typeof scheme?.slug === "string" ? scheme.slug : typeof scheme?.id === "string" ? scheme.id : "";
+  const slugPhrase = slug.includes("-") ? normaliseForMatch(slug.replace(/-+/g, " ")) : "";
+
+  // Tags are deliberately NOT name phrases: a tag such as "income" must never
+  // behave like a scheme name. Tags only contribute the weaker, gated tag score.
+  const phrases = [
+    ...new Set([...names, ...codes, slugPhrase].map(normaliseForMatch).filter(Boolean)),
+  ];
+
+  // Each name is indexed separately: an English query is compared with the
+  // English name and a Telugu query with the Telugu name, so one script never
+  // dilutes the other's overlap ratio.
+  const nameTokenSets = names.map((name) => {
+    const tokens = [...new Set(normaliseForMatch(name).split(" ").filter(Boolean))];
+    const significant = tokens.filter((token) => !MATCH_STOPWORDS.has(token) && token.length >= 2);
+    return {
+      tokens,
+      significant,
+      // The head word of a name is the proper-noun-like part ("Ayushman" in
+      // "Ayushman Bharat …"); only that may identify a scheme on its own.
+      head: significant[0] || null,
+    };
+  });
+
+  const allTokens = [...new Set(phrases.flatMap((phrase) => phrase.split(" ")).filter(Boolean))];
+
+  return { scheme, phrases, codes, nameTokenSets, allTokens, tagPhrases };
+}
+
+// ── Scoring ─────────────────────────────────────────────────────────────────
+
+const NAME_EXACT_SCORE = 150;      // query is exactly the scheme name
+const NAME_IN_QUERY_SCORE = 130;   // the full name appears inside the query
+const RUN_BASE_SCORE = 90;         // consecutive name words (2+), +10 each
+const CODE_SCORE = 110;            // code / slug / compact code ("pmkisan")
+const NAME_FULL_TOKENS_SCORE = 85; // every significant name word present
+const NAME_MOST_TOKENS_SCORE = 55; // ≥60% of significant name words present
+const PARTIAL_TOKEN_SCORE = 25;    // weaker partial overlap
+const TAG_SCORE = 35;              // a record tag appears in the query
+const CONCEPT_SCORE = 25;          // topic concept claimed by the record
+const HINT_BONUS = 5;
+
+/** Ties below this score are treated as ambiguous and resolve to no scheme. */
+const AMBIGUITY_FLOOR = NAME_FULL_TOKENS_SCORE;
+
+/** True when the record claims a concept through its own identity text. */
+function identityClaimsConcept(identity, conceptId) {
+  const synonyms = CONCEPT_TOKENS[conceptId];
+  if (!synonyms || synonyms.size === 0) return false;
+  for (const token of identity.allTokens) {
+    for (const synonym of synonyms) {
+      if (tokenMatches(token, synonym)) return true;
+    }
+  }
+  return false;
+}
+
+/** Score one scheme against one query. Returns 0 when there is no evidence. */
+function scoreSchemeIdentity(query, identity, agriContext, documentFrequency, hintSlug) {
+  let score = 0;
+
+  // 1. Name / slug / tag phrases: exact name, name inside query, then runs.
+  for (const phrase of identity.phrases) {
+    if (query.text === phrase) {
+      score = Math.max(score, NAME_EXACT_SCORE);
+      continue;
+    }
+    if (phrase.length >= 6 && query.text.includes(phrase)) {
+      score = Math.max(score, NAME_IN_QUERY_SCORE);
+      continue;
+    }
+
+    const phraseTokens = phrase.split(" ");
+    if (phraseTokens.length < 2) continue;
+
+    const originalRun = longestRun(phraseTokens, query.sequence);
+    const transliteratedRun = longestRun(phraseTokens, query.transliterated);
+    const run = transliteratedRun.length > originalRun.length ? transliteratedRun : originalRun;
+    if (run.length < 2) continue;
+
+    // "credit card" alone describes a bank product, not a farm scheme.
+    const genericOnly = run.tokens.every((token) => CONSUMER_FINANCE_TOKENS.has(token));
+    if (genericOnly && !agriContext) continue;
+
+    // "Pradhan Mantri" opens several unrelated schemes, so a run of only shared
+    // words is not identifying unless it is long enough to be specific.
+    const distinctiveRun = run.tokens.some((token) => documentFrequency.get(token) === 1);
+    if (run.length < 3 && !distinctiveRun) continue;
+
+    score = Math.max(score, Math.min(NAME_IN_QUERY_SCORE, RUN_BASE_SCORE + run.length * 10));
+  }
+
+  // 2. Codes and slugs: whole tokens, or a compact run ("pmkisan", "pmjay").
+  for (const code of identity.codes) {
+    const parts = code.split(" ");
+    const compact = code.replace(/ /g, "");
+    const genericOnly = parts.every((part) => CONSUMER_FINANCE_TOKENS.has(part));
+
+    if (parts.every((part) => query.tokens.some((token) => tokenMatches(token, part)))) {
+      if (agriContext || !genericOnly) score = Math.max(score, CODE_SCORE);
+    } else if (compact.length >= 5 && query.compact.includes(compact)) {
+      if (agriContext || !genericOnly) score = Math.max(score, CODE_SCORE);
+    }
+  }
+
+  // 3. Name-token overlap, scored per name. Shared words ("kisan" in several
+  //    records) are weak evidence; a word unique to one record is meaningful.
+  for (const nameTokens of identity.nameTokenSets) {
+    const significantTokens = nameTokens.significant;
+    if (significantTokens.length < 2) continue;
+
+    const matched = significantTokens.filter((token) =>
+      query.tokens.some((queryToken) => tokenMatches(queryToken, token))
+    );
+    if (matched.length === 0) continue;
+
+    const genericOnly = matched.every((token) => CONSUMER_FINANCE_TOKENS.has(token));
+    if (genericOnly && !agriContext) continue;
+
+    const ratio = matched.length / significantTokens.length;
+    if (matched.length === significantTokens.length) {
+      score = Math.max(score, NAME_FULL_TOKENS_SCORE);
+    } else if (ratio >= 0.6) {
+      score = Math.max(score, NAME_MOST_TOKENS_SCORE);
+    } else if (
+      // Weak overlap only counts when at least one matched word is unique to
+      // this record; a word shared by several schemes proves nothing.
+      matched.some((token) => documentFrequency.get(token) === 1) &&
+      (matched.length >= 2 || matched.includes(nameTokens.head))
+    ) {
+      score = Math.max(score, PARTIAL_TOKEN_SCORE);
+    }
+  }
+
+  // 4. Weak evidence that only counts with agriculture context: record tags and
+  //    topic concepts the record itself claims.
+  if (agriContext) {
+    for (const tag of identity.tagPhrases) {
+      if (phraseInQuery(query, tag)) {
+        score = Math.max(score, TAG_SCORE);
+        break;
+      }
+    }
+
+    for (const conceptId of query.askedConcepts) {
+      if (!identityClaimsConcept(identity, conceptId)) continue;
+      score = Math.max(score, CONCEPT_SCORE);
+      break;
+    }
+  }
+
+  if (score > 0 && hintSlug && identity.scheme?.id === hintSlug) score += HINT_BONUS;
+
+  return score;
+}
+
+/**
+ * Rank every scheme that the message plausibly refers to, highest score first.
+ * Data-driven: the index is built from each record, so a scheme with an id that
+ * was never mentioned in code is matched like any other.
+ *
+ * Exported for tests; the conversational assistant still uses the single best
+ * match, so UI behaviour is unchanged in this step.
+ */
+export function findSchemeMatches(text, schemes, lang = "en", hintSlug = null) {
+  const list = Array.isArray(schemes) ? schemes.filter(Boolean) : [];
+  const query = buildQuery(text);
+  if (list.length === 0 || query.tokens.length === 0) return [];
+
+  const agriContext = STRONG_AGRIC_RE.test(query.text);
+  const identities = list.map((scheme) => buildSchemeIdentity(scheme, lang));
+
+  // How many records each word identifies (counted across names, codes, slugs
+  // and tags, so slug-only records take part too).
+  const documentFrequency = new Map();
+  for (const identity of identities) {
+    for (const token of identity.allTokens) {
+      documentFrequency.set(token, (documentFrequency.get(token) || 0) + 1);
+    }
+  }
+
+  // Tokens of the concepts this query asks about, for a cheap pre-filter.
+  const askedConceptTokens = new Set();
+  for (const conceptId of query.askedConcepts) {
+    for (const token of CONCEPT_TOKENS[conceptId]) askedConceptTokens.add(token);
+  }
+
+  const scored = [];
+  for (const identity of identities) {
+    const sharesNameToken = identity.allTokens.some((token) =>
+      query.tokens.some((queryToken) => tokenMatches(queryToken, token))
+    );
+    const sharesCode = identity.codes.some((code) => {
+      const compact = code.replace(/ /g, "");
+      return compact.length >= 5 && query.compact.includes(compact);
+    });
+    const sharesConceptToken =
+      askedConceptTokens.size > 0 &&
+      identity.allTokens.some((token) => {
+        for (const synonym of askedConceptTokens) {
+          if (tokenMatches(token, synonym)) return true;
+        }
+        return false;
+      });
+
+    if (!sharesNameToken && !sharesCode && !sharesConceptToken) continue;
+
+    const score = scoreSchemeIdentity(query, identity, agriContext, documentFrequency, hintSlug);
+    if (score > 0) scored.push({ scheme: identity.scheme, score });
+  }
+
+  // Stable sort: equal scores keep dataset order.
+  return scored.sort((a, b) => b.score - a.score);
+}
 
 /**
  * Match a user message to the best scheme in the dataset.
  *
- * Evidence-gated: a scheme is returned only when its explicit identifier (name,
- * code, strong phrase) is present, OR when a generic topic word is present
- * together with strong agriculture context. Unrelated text that merely shares a
- * generic word ("insurance", "credit card", "income") returns null so the
- * caller can clarify or answer off-topic instead of showing a random card.
+ * Evidence-gated: a scheme is returned only when the message carries real
+ * evidence for it — its code, slug, name, name words or tags. Weak evidence
+ * (topic concepts such as "insurance" or "loan") only counts with agriculture
+ * context, so unrelated text returns null and the caller clarifies instead of
+ * showing a random card.
+ *
+ * When two records are equally weak candidates the query is ambiguous and null
+ * is returned.
  *
  * Accepts an optional hint slug to bias scoring when the caller already knows
  * the likely scheme (e.g. from conversation history). Exported for unit tests.
  */
 export function findBestSchemeMatch(text, schemes, lang = "en", hintSlug = null) {
-  const t = String(text || "").toLowerCase();
-  const agriContext = STRONG_AGRIC_RE.test(t);
+  const ranked = findSchemeMatches(text, schemes, lang, hintSlug);
+  if (ranked.length === 0) return null;
 
-  let best = null;
-  let bestScore = 0;
+  const [top, second] = ranked;
+  if (second && top.score === second.score && top.score < AMBIGUITY_FLOOR) return null;
 
-  for (const scheme of schemes) {
-    const id = (scheme.id || "").toLowerCase();
-    const matcher = SCHEME_MATCHERS[id];
-    if (!matcher) continue;
-
-    const langData = scheme[lang] || scheme.en;
-    let score = 0;
-
-    if (hintSlug && id === hintSlug) score += 5;
-    if (matcher.strong.test(t)) score += 100;
-    if (matcher.translit && agriContext && matcher.translit.test(t)) score += 80;
-
-    // Exact code / full-name mention is strong evidence.
-    const code = (scheme.code || "").toLowerCase();
-    if (code && t.includes(code)) score += 95;
-    if (langData?.name && langData.name.length > 6 && t.includes(langData.name.toLowerCase())) score += 95;
-
-    // Generic topic words only count with agriculture context (evidence gate).
-    if (agriContext && matcher.generic.test(t)) score += 25;
-
-    if (score > bestScore) {
-      bestScore = score;
-      best = scheme;
-    }
-  }
-
-  return bestScore > 0 ? best : null;
+  return top.scheme;
 }
 
 /**
- * Handle PM-KISAN interactive eligibility screening one question at a time.
+ * Schemes with a working deterministic screening flow.
  *
- * Answer parsing is delegated to the shared `classifyEligibilityAnswer` guard so
- * ambiguous replies ("I don't know", "maybe") re-ask instead of producing a
- * false determination. `preAnswer` may carry a caller-classified answer.
+ * The interview encodes no scheme facts: every question, exclusion rule and
+ * document list is rendered from the selected record. A scheme is enrolled here
+ * only once its verified eligibility text is expressed as requirements a farmer
+ * can self-check, because the flow re-asks ambiguous answers and must never
+ * guess a rule.
  */
-function handlePmkisanEligibility(userMessage, step, lang = "en", scheme, preAnswer = null) {
+const ELIGIBILITY_SCREENING_SCHEME_IDS = new Set(["pm-kisan"]);
+
+const PRELIMINARY_NOTE_EN =
+  "*(Note: This application provides preliminary guidance from the verified record, not an official administrative ruling.)*";
+const PRELIMINARY_NOTE_TE =
+  "*(గమనిక: ఇది ధృవీకరించిన రికార్డు ఆధారంగా ప్రాథమిక మార్గదర్శకత్వం మాత్రమే, అధికారిక నిర్ణయం కాదు.)*";
+
+/** Markers that identify an eligibility item as an exclusion rule. */
+const EXCLUSION_HINT_RE =
+  /\b(?:exclu\w*|excluded|ineligible|disqualif\w*|not eligible)\b|మినహాయింపు|అనర్హ/iu;
+
+/** Record strings for one scheme, preferring the requested language. */
+function recordStrings(scheme, lang) {
+  const preferred = scheme?.[lang] || {};
+  const fallback = scheme?.en || {};
+  const list = (value) =>
+    Array.isArray(value) ? value.filter((entry) => typeof entry === "string" && entry.trim()) : [];
+  const pickList = (key) => {
+    const localised = list(preferred[key]);
+    return localised.length > 0 ? localised : list(fallback[key]);
+  };
+  return {
+    name: preferred.name || fallback.name || scheme?.code || scheme?.id || "",
+    description: preferred.shortDescription || fallback.shortDescription || "",
+    eligibility: pickList("eligibility"),
+    documents: pickList("requiredDocuments"),
+    benefits: pickList("benefits"),
+    url: scheme?.verifiedOfficialUrl || "",
+  };
+}
+
+/** Strip a leading "Exclusions:" label so the record text reads as a rule. */
+function cleanEligibilityItem(item) {
+  return cleanText(item)
+    .replace(/^\s*(?:exclusions?|excluded|exclusion criteria)\s*[:\-–]\s*/i, "")
+    .replace(/^\s*మినహాయింపులు?\s*[:\-–]\s*/u, "")
+    .trim();
+}
+
+/**
+ * Split a record's eligibility text into the requirements a farmer can check
+ * against their own situation and the exclusion rules that override them. The
+ * split is driven only by the record's wording — no scheme is special-cased.
+ */
+function eligibilityFacts(scheme, lang = "en") {
+  const data = recordStrings(scheme, lang);
+  const requirements = [];
+  const exclusions = [];
+  for (const item of data.eligibility) {
+    (EXCLUSION_HINT_RE.test(item) ? exclusions : requirements).push(cleanEligibilityItem(item));
+  }
+  return { ...data, requirements, exclusions };
+}
+
+/**
+ * True when a scheme has a working deterministic screening flow AND its record
+ * carries the criteria the interview asks about. Exported so callers and tests
+ * can tell whether screening is genuinely available for a scheme.
+ */
+export function canScreenEligibility(scheme) {
+  if (!scheme || !ELIGIBILITY_SCREENING_SCHEME_IDS.has(scheme.id)) return false;
+  return eligibilityFacts(scheme, "en").requirements.length > 0;
+}
+
+/** Official portal lines, added only when the record actually carries a URL. */
+function portalLines(facts, lang) {
+  if (!facts.url) return [];
+  return ["", lang === "te" ? `అధికారిక పోర్టల్: ${facts.url}` : `Official portal: ${facts.url}`];
+}
+
+/**
+ * Build the general-overview answer purely from a scheme's verified record.
+ * A missing summary is reported as unavailable — never replaced with a generic
+ * description. Exported for unit tests.
+ */
+export function buildSchemeOverview(scheme, lang = "en") {
+  const data = recordStrings(scheme, lang);
+  const te = lang === "te";
+  const benefits = data.benefits.slice(0, 3).map((b) => `• ${cleanText(b)}`).join("\n");
+  const eligibility = data.eligibility.slice(0, 3).map((e) => `• ${cleanText(e)}`).join("\n");
+  const missing = te
+    ? "• ఈ వివరాలు ధృవీకరించిన రికార్డులో అందుబాటులో లేవు."
+    : "• Information not available in the verified record.";
+
+  const lines = te
+    ? [
+        `### ${data.name}`,
+        "",
+        cleanText(data.description) || "ఈ పథకం వివరణ ధృవీకరించిన రికార్డులో అందుబాటులో లేదు.",
+        "",
+        "### ముఖ్య ప్రయోజనాలు:",
+        benefits || missing,
+        "",
+        "### ముఖ్య అర్హతలు:",
+        eligibility || missing,
+      ]
+    : [
+        `### ${data.name}`,
+        "",
+        cleanText(data.description) || "This scheme's description is not available in the verified record.",
+        "",
+        "### Core Benefits:",
+        benefits || missing,
+        "",
+        "### Key Eligibility:",
+        eligibility || missing,
+      ];
+
+  return lines.join("\n");
+}
+
+/** Result for a household the record's rules do not exclude. */
+function positiveEligibilityResult(facts, lang, scheme) {
+  const te = lang === "te";
+  const documents = facts.documents.length
+    ? facts.documents.map((doc, idx) => `${idx + 1}. ${cleanText(doc)}`).join("\n")
+    : te
+      ? "• అవసరమైన పత్రాల వివరాలు ధృవీకరించిన రికార్డులో అందుబాటులో లేవు. దయచేసి అధికారిక పోర్టల్‌ను చూడండి."
+      : "• Required documents are not listed in the verified record. Please check the official portal.";
+  const benefits = facts.benefits.slice(0, 3).map((b) => `• ${cleanText(b)}`).join("\n");
+
+  const lines = te
+    ? [
+        `### ప్రాథమిక అర్హత అంచనా: ${facts.name}`,
+        "",
+        `మీరు అందించిన సమాచారం మరియు ధృవీకరించిన రికార్డు ప్రకారం, **${facts.name}** పథకానికి మీరు **ప్రాథమికంగా అర్హులు**గా కనిపిస్తున్నారు.`,
+        "",
+        "📋 **అవసరమైన పత్రాలు (ధృవీకరించిన రికార్డు నుండి):**",
+        documents,
+      ]
+    : [
+        `### Preliminary Eligibility Assessment: ${facts.name}`,
+        "",
+        `Based on the verified record and your answers, you appear **preliminarily eligible** for **${facts.name}**.`,
+        "",
+        "📋 **Required documents (from the verified record):**",
+        documents,
+      ];
+
+  if (benefits) {
+    lines.push(
+      "",
+      te ? "### ముఖ్య ప్రయోజనాలు (ధృవీకరించిన రికార్డు నుండి):" : "### Key benefits (from the verified record):",
+      benefits
+    );
+  }
+
+  lines.push("", te ? PRELIMINARY_NOTE_TE : PRELIMINARY_NOTE_EN, ...portalLines(facts, lang));
+
+  return {
+    status: "eligibility_result",
+    message: lines.join("\n"),
+    eligibilityState: null,
+    primaryScheme: scheme,
+  };
+}
+
+/** Result for a household that fails one of the record's stated rules. */
+function negativeEligibilityResult(facts, lang, scheme, copy) {
+  const te = lang === "te";
+  const items = copy.items.map((item) => `• ${item}`);
+  const lines = te
+    ? [
+        `### ${copy.headingTe}`,
+        "",
+        copy.bodyTe,
+        "",
+        ...items,
+        "",
+        `• **ప్రాథమిక మార్గదర్శకత్వం:** ఈ నిబంధన ప్రకారం మీరు **${facts.name}** పథకానికి అర్హులు కాకపోవచ్చు.`,
+        "",
+        PRELIMINARY_NOTE_TE,
+      ]
+    : [
+        `### ${copy.headingEn}`,
+        "",
+        copy.bodyEn,
+        "",
+        ...items,
+        "",
+        `• **Preliminary Guidance:** Under this rule you are likely **not eligible** for **${facts.name}**.`,
+        "",
+        PRELIMINARY_NOTE_EN,
+      ];
+
+  lines.push(...portalLines(facts, lang));
+
+  return {
+    status: "eligibility_result",
+    message: lines.join("\n"),
+    eligibilityState: null,
+    primaryScheme: scheme,
+  };
+}
+
+/**
+ * Run one turn of the deterministic eligibility screening.
+ *
+ * Sequencing and answer parsing live here (steps: land_ownership → exclusions),
+ * while every official fact — requirement, exclusion list, documents, benefits,
+ * portal — comes from the selected scheme record. A record without verified
+ * criteria cannot be screened; the flow says so instead of guessing.
+ * Answer parsing is delegated to `classifyEligibilityAnswer`, so ambiguous
+ * replies re-ask rather than producing a false determination. Exported for
+ * unit tests.
+ */
+export function handleEligibilityScreening(userMessage, step, lang = "en", scheme, preAnswer = null) {
   const norm = (userMessage || "").trim().toLowerCase();
   // Shared, ambiguity-aware answer classification (re-asks on unclear replies).
   const answer = preAnswer ?? classifyEligibilityAnswer(norm, step);
+  const facts = eligibilityFacts(scheme, lang);
+  const te = lang === "te";
+  const primaryRequirement = facts.requirements[0] || "";
 
-  // Step 1: Initial invocation -> Ask Question 1 (Land Ownership)
+  // No verified criteria → nothing to screen against. Never substitute generic
+  // or PM-KISAN rules for a record that does not state them.
+  if (facts.requirements.length === 0) {
+    const lines = te
+      ? [
+          `### అర్హత తనిఖీ అందుబాటులో లేదు: ${facts.name || "ఈ పథకం"}`,
+          "",
+          `**${facts.name || "ఈ పథకం"}** కొరకు అర్హత నిబంధనలు ధృవీకరించిన రికార్డులో లేవు, కాబట్టి దశలవారీ తనిఖీ చేయలేము.`,
+          "",
+          "దయచేసి అధికారిక పోర్టల్‌లో అధికారిక నిబంధనలను పరిశీలించండి.",
+        ]
+      : [
+          `### Eligibility Screening Unavailable: ${facts.name || "this scheme"}`,
+          "",
+          `The verified record for **${facts.name || "this scheme"}** does not contain eligibility criteria this app can screen against, so a step-by-step check is not possible.`,
+          "",
+          "Please check the official portal for the authoritative requirements.",
+        ];
+    lines.push(...portalLines(facts, lang));
+
+    return {
+      status: "found",
+      message: lines.join("\n"),
+      eligibilityState: null,
+      primaryScheme: scheme,
+      matchedSchemes: scheme ? [scheme] : [],
+    };
+  }
+
+  // Step 1 — self-check against the requirement the record states first.
   if (!step || step === "start") {
-    const msgEn = [
-      "### Preliminary Eligibility Check: PM-KISAN",
-      "",
-      "This application provides **preliminary guidance only**, not an official eligibility determination. Official enrollment requires revenue verification and eKYC authentication.",
-      "",
-      "To check your eligibility step-by-step, please answer the first question:",
-      "",
-      "**1. Do you or your immediate family own cultivable agricultural land** with land records (Patta / 1-B / RoR) in your name?",
-      "",
-      "*(Please reply with **Yes** or **No**)*",
-    ].join("\n");
+    const alsoNoted = facts.requirements.slice(1).map((item) => `• ${item}`);
 
-    const msgTe = [
-      "### ప్రాథమిక అర్హత తనిఖీ: పీఎం-కిసాన్",
-      "",
-      "ఈ అప్లికేషన్ **ప్రాథమిక సమాచార మార్గదర్శకత్వాన్ని మాత్రమే** అందిస్తుంది, ఇది తుది అధికారిక నిర్ణయం కాదు. అధికారిక నమోదుకు రెవెన్యూ పరిశీలన మరియు eKYC తప్పనిసరి.",
-      "",
-      "మీ అర్హతను పరిశీలించడానికి మొదటి ప్రశ్నకు సమాధానం ఇవ్వండి:",
-      "",
-      "**1. మీ పేరిట లేదా మీ కుటుంబ సభ్యుల పేరిట పట్టాదారు పాస్ పుస్తకం / 1-B / RoR కలిగిన సాగు భూమి ఉందా?**",
-      "",
-      "*(దయచేసి **అవును** లేదా **కాదు** అని తెలపండి)*",
-    ].join("\n");
+    const lines = te
+      ? [
+          `### ప్రాథమిక అర్హత తనిఖీ: ${facts.name}`,
+          "",
+          "ఈ యాప్ **ప్రాథమిక మార్గదర్శకత్వాన్ని** మాత్రమే అందిస్తుంది; ఇది అధికారిక అర్హత నిర్ణయం కాదు. అధికారిక నమోదుకు సంబంధిత అధికారుల ధృవీకరణ అవసరం.",
+          "",
+          "ధృవీకరించిన రికార్డులో ఈ అర్హత నిబంధన ఉంది:",
+          "",
+          `• ${primaryRequirement}`,
+          ...(alsoNoted.length ? ["", "ఇందులో ఇవి కూడా ఉన్నాయి:", ...alsoNoted] : []),
+          "",
+          "**1. ఈ నిబంధన మీ కుటుంబానికి వర్తిస్తుందా?**",
+          "",
+          "*(దయచేసి **అవును** లేదా **కాదు** అని తెలపండి)*",
+        ]
+      : [
+          `### Preliminary Eligibility Check: ${facts.name}`,
+          "",
+          "This application provides **preliminary guidance only**, not an official eligibility determination. Official enrolment requires verification by the implementing authority.",
+          "",
+          "The verified record lists this eligibility requirement:",
+          "",
+          `• ${primaryRequirement}`,
+          ...(alsoNoted.length ? ["", "It also notes:", ...alsoNoted] : []),
+          "",
+          "**1. Does this requirement apply to your household?**",
+          "",
+          "*(Please reply with **Yes** or **No**)*",
+        ];
 
     return {
       status: "eligibility_question",
-      message: lang === "te" ? msgTe : msgEn,
-      eligibilityState: { schemeId: "pm-kisan", step: "land_ownership" },
+      message: lines.join("\n"),
+      eligibilityState: { schemeId: scheme?.id || "", step: "land_ownership" },
       primaryScheme: scheme,
     };
   }
@@ -550,86 +1189,68 @@ function handlePmkisanEligibility(userMessage, step, lang = "en", scheme, preAns
   // Step 2: Evaluating Land Ownership response
   if (step === "land_ownership") {
     if (answer === "no") {
-      const msgEn = [
-        "### Preliminary Assessment: Land Ownership Criterion",
-        "",
-        "Thank you for clarifying. According to official PM-KISAN operational guidelines, **ownership of cultivable agricultural land** in the farmer's name is a mandatory eligibility requirement.",
-        "",
-        "• **Preliminary Guidance:** You are likely not eligible for PM-KISAN direct cash assistance because landholding title in your name is required.",
-        "• **Alternative Options:** Tenant cultivators may explore **Kisan Credit Card (KCC)** or **PMFBY (Crop Insurance)**, which provide credit and crop loss coverage to tenant and sharecropper farmers.",
-        "",
-        "*(Note: This application provides preliminary guidance based on official scheme rules, not an official administrative ruling.)*",
-      ].join("\n");
-
-      const msgTe = [
-        "### ప్రాథమిక అంచనా: భూ యాజమాన్య నిబంధన",
-        "",
-        "సమాచారం అందించినందుకు ధన్యవాదాలు. అధికారిక పీఎం-కిసాన్ మార్గదర్శకాల ప్రకారం, దరఖాస్తుదారుడి పేరిట **సాగు భూమి యాజమాన్య హక్కులు** ఉండటం తప్పనిసరి.",
-        "",
-        "• **ప్రాథమిక మార్గదర్శకత్వం:** భూమి యాజమాన్యం లేకపోవడం వల్ల మీరు పీఎం-కిసాన్ పథకానికి అర్హులు కాకపోవచ్చు.",
-        "• **ఇతర అవకాశాలు:** కౌలు రైతులు పంట రుణాలు మరియు బీమా కోసం **కిసాన్ క్రెడిట్ కార్డు (KCC)** లేదా **పీఎం ఫసల్ బీమా యోజన (PMFBY)** పథకాలను పరిశీలించవచ్చు.",
-        "",
-        "*(గమనిక: ఇది ప్రాథమిక సమాచార మార్గదర్శకత్వం మాత్రమే, అధికారిక నిర్ణయం కాదు.)*",
-      ].join("\n");
-
-      return {
-        status: "eligibility_result",
-        message: lang === "te" ? msgTe : msgEn,
-        eligibilityState: null,
-        primaryScheme: scheme,
-      };
+      return negativeEligibilityResult(facts, lang, scheme, {
+        headingEn: "Preliminary Assessment: Requirement Not Met",
+        headingTe: "ప్రాథమిక అంచనా: నిబంధన నెరవేరలేదు",
+        bodyEn: "You indicated that this requirement does not apply to your household:",
+        bodyTe: "ఈ నిబంధన మీ కుటుంబానికి వర్తించదని మీరు తెలిపారు:",
+        items: [primaryRequirement],
+      });
     }
 
     if (answer === "yes") {
-      const msgEn = [
-        "### Step 2: PM-KISAN Exclusion Criteria",
-        "",
-        "Understood. Since you have cultivable landholding, we must check if any statutory exclusion rules apply to you or your immediate family.",
-        "",
-        "**2. Do you or any member of your immediate family fall into any of these exclusion categories?**",
-        "• Current or former constitutional post holders (Ministers, MPs, MLAs, Mayors, District Panchayat Chairpersons)",
-        "• Serving or retired Government / PSU employees (excluding Group D / Multi-Tasking Staff)",
-        "• Practicing professionals (Doctors, Engineers, Lawyers, Chartered Accountants, Architects)",
-        "• Paid Income Tax in the last assessment year, or receiving a monthly pension of ₹10,000 or more (excluding Group D/MTS)",
-        "",
-        "*(Please reply with **None of these** or **Yes, an exclusion applies**)*",
-      ].join("\n");
+      // A record with no exclusion rules needs no second question: report the
+      // record's own criteria as met and show its verified details.
+      if (facts.exclusions.length === 0) {
+        return positiveEligibilityResult(facts, lang, scheme);
+      }
 
-      const msgTe = [
-        "### దశ 2: పీఎం-కిసాన్ మినహాయింపు నిబంధనలు",
-        "",
-        "సాగు భూమి ఉన్నట్లు నిర్ధారించినందుకు ధన్యవాదాలు. ఇప్పుడు కుటుంబానికి వర్తించే మినహాయింపు నిబంధనలను పరిశీలిద్దాం.",
-        "",
-        "**2. మీరు లేదా మీ కుటుంబంలో ఎవరైనా క్రింది వర్గాలలో ఉన్నారా?**",
-        "• రాజ్యాంగ పదవులు నిర్వహించిన వారు (మంత్రులు, ఎంపీలు, ఎమ్మెల్యేలు మొదలైనవారు)",
-        "• ప్రభుత్వ లేదా ప్రభుత్వ రంగ సంస్థల ఉద్యోగులు/పెన్షనర్లు (గ్రూప్-D / MTS మినహా)",
-        "• ప్రాక్టీస్ చేస్తున్న నిపుణులు (డాక్టర్లు, ఇంజనీర్లు, లాయర్లు, చార్టర్డ్ అకౌంటెంట్లు)",
-        "• గత ఆర్థిక సంవత్సరంలో ఆదాయపు పన్ను (Income Tax) చెల్లించిన వారు, లేదా నెలకు ₹10,000 పైగా పెన్షన్ పొందుతున్నవారు",
-        "",
-        "*(దయచేసి **ఎవరూ లేరు / వర్తించదు** లేదా **అవును, వర్తిస్తుంది** అని తెలపండి)*",
-      ].join("\n");
+      const exclusionItems = facts.exclusions.map((item) => `• ${item}`);
+      const lines = te
+        ? [
+            `### దశ 2: మినహాయింపు నిబంధనలు — ${facts.name}`,
+            "",
+            "ధన్యవాదాలు. ధృవీకరించిన రికార్డులో ఈ మినహాయింపు నిబంధనలు కూడా ఉన్నాయి:",
+            "",
+            ...exclusionItems,
+            "",
+            "**2. ఈ మినహాయింపు నిబంధనలలో ఏదైనా మీకు లేదా మీ కుటుంబానికి వర్తిస్తుందా?**",
+            "",
+            "*(దయచేసి **ఎవరూ లేరు / వర్తించదు** లేదా **అవును, వర్తిస్తుంది** అని తెలపండి)*",
+          ]
+        : [
+            `### Step 2: Exclusion Rules — ${facts.name}`,
+            "",
+            "Thanks. The verified record also lists these exclusion rules:",
+            "",
+            ...exclusionItems,
+            "",
+            "**2. Do any of these exclusion rules apply to you or your immediate family?**",
+            "",
+            "*(Please reply with **None of these** or **Yes, an exclusion applies**)*",
+          ];
 
       return {
         status: "eligibility_question",
-        message: lang === "te" ? msgTe : msgEn,
-        eligibilityState: { schemeId: "pm-kisan", step: "exclusions" },
+        message: lines.join("\n"),
+        eligibilityState: { schemeId: scheme?.id || "", step: "exclusions" },
         primaryScheme: scheme,
       };
     }
 
-    // Ambiguous answer — ask without inferring
+    // Ambiguous answer — re-ask the record's own requirement, infer nothing.
     const clarifyEn = [
-      "I could not determine your answer from your response. To provide accurate guidance without making assumptions:",
+      "I could not tell from your reply whether this requirement applies to you:",
       "",
-      "**Do you or your immediate family own cultivable agricultural land?**",
+      `• ${primaryRequirement}`,
       "",
       "Please reply clearly with **Yes** or **No**.",
     ].join("\n");
 
     const clarifyTe = [
-      "మీ సమాధానం స్పష్టంగా లేదు. ఎలాంటి ఊహాగానాలు లేకుండా సరైన సమాచారం ఇవ్వడానికి:",
+      "మీ సమాధానం స్పష్టంగా లేదు. ఈ నిబంధన మీకు వర్తిస్తుందో లేదో తెలియడం లేదు:",
       "",
-      "**మీ పేరిట లేదా మీ కుటుంబ సభ్యుల పేరిట సాగు భూమి ఉందా?**",
+      `• ${primaryRequirement}`,
       "",
       "దయచేసి **అవును** లేదా **కాదు** అని స్పష్టంగా తెలపండి.",
     ].join("\n");
@@ -637,7 +1258,7 @@ function handlePmkisanEligibility(userMessage, step, lang = "en", scheme, preAns
     return {
       status: "eligibility_question",
       message: lang === "te" ? clarifyTe : clarifyEn,
-      eligibilityState: { schemeId: "pm-kisan", step: "land_ownership" },
+      eligibilityState: { schemeId: scheme?.id || "", step: "land_ownership" },
       primaryScheme: scheme,
     };
   }
@@ -645,77 +1266,17 @@ function handlePmkisanEligibility(userMessage, step, lang = "en", scheme, preAns
   // Step 3: Evaluating Exclusions response
   if (step === "exclusions") {
     if (answer === "applies") {
-      const msgEn = [
-        "### Preliminary Assessment: PM-KISAN Statutory Exclusion",
-        "",
-        "Thank you for providing this detail. Under official PM-KISAN guidelines, individuals or families meeting any of the exclusion criteria (such as income tax payers, serving/retired government officers, or constitutional post holders) are **statutorily excluded** from the scheme benefits.",
-        "",
-        "• **Preliminary Guidance:** You are likely not eligible for PM-KISAN financial assistance due to this statutory exclusion rule.",
-        "",
-        "*(Note: This application provides preliminary guidance based on official scheme rules, not an official administrative ruling.)*",
-      ].join("\n");
-
-      const msgTe = [
-        "### ప్రాథమిక అంచనా: పీఎం-కిసాన్ మినహాయింపు నిబంధన",
-        "",
-        "వివరాలు తెలిపినందుకు ధన్యవాదాలు. పీఎం-కిసాన్ మార్గదర్శకాల ప్రకారం, ఆదాయపు పన్ను చెల్లింపుదారులు లేదా ప్రభుత్వ ఉద్యోగులు ఉన్న కుటుంబాలు ఈ పథకానికి **అనర్హులు**గా పరిగణించబడతాయి.",
-        "",
-        "• **ప్రాథమిక మార్గదర్శకత్వం:** మినహాయింపు నిబంధనల ప్రకారం మీరు పీఎం-కిసాన్ పథకానికి అర్హులు కాకపోవచ్చు.",
-        "",
-        "*(గమనిక: ఇది ప్రాథమిక సమాచార మార్గదర్శకత్వం మాత్రమే, అధికారిక నిర్ణయం కాదు.)*",
-      ].join("\n");
-
-      return {
-        status: "eligibility_result",
-        message: lang === "te" ? msgTe : msgEn,
-        eligibilityState: null,
-        primaryScheme: scheme,
-      };
+      return negativeEligibilityResult(facts, lang, scheme, {
+        headingEn: "Preliminary Assessment: Exclusion Rule Applies",
+        headingTe: "ప్రాథమిక అంచనా: మినహాయింపు నిబంధన వర్తిస్తుంది",
+        bodyEn: "You indicated that an exclusion rule applies. The verified record excludes applicants in these cases:",
+        bodyTe: "మినహాయింపు నిబంధన వర్తిస్తుందని మీరు తెలిపారు. ధృవీకరించిన రికార్డు ఈ సందర్భాలలో అర్హతను మినహాయిస్తుంది:",
+        items: facts.exclusions,
+      });
     }
 
     if (answer === "none") {
-      const msgEn = [
-        "### Preliminary Eligibility Assessment: PM-KISAN",
-        "",
-        "Based on the facts you supplied:",
-        "1. You own cultivable agricultural land.",
-        "2. None of the statutory exclusion criteria apply to your family.",
-        "",
-        "✅ **Preliminary Guidance:** You appear **preliminarily eligible** to register for PM-KISAN.",
-        "",
-        "📋 **Required Documents for Official Registration:**",
-        "1. **Aadhaar Card** (Mandatory for biometric/OTP eKYC verification)",
-        "2. **Land Ownership Records** (Patta / 1-B / RoR showing applicant name)",
-        "3. **Aadhaar-seeded Active Bank Account** details (Bank IFSC & Account Number)",
-        "4. **Aadhaar-linked Mobile Number** for OTP authentication",
-        "",
-        "⚠️ **Important Disclaimer:** This application provides preliminary guidance, not an official eligibility determination. Official sanction requires land record verification by your local Agriculture/Revenue authority and completion of mandatory eKYC on the official portal.",
-      ].join("\n");
-
-      const msgTe = [
-        "### ప్రాథమిక అర్హత అంచనా: పీఎం-కిసాన్",
-        "",
-        "మీరు అందించిన సమాచారం ప్రకారం:",
-        "1. మీకు సాగు భూమి యాజమాన్యం ఉంది.",
-        "2. ఎటువంటి మినహాయింపు నిబంధనలు మీకు వర్తించవు.",
-        "",
-        "✅ **ప్రాథమిక మార్గదర్శకత్వం:** మీరు పీఎం-కిసాన్ పథకానికి **ప్రాథమికంగా అర్హులు**గా కనిపిస్తున్నారు.",
-        "",
-        "📋 **అవసరమైన పత్రాలు:**",
-        "1. **ఆధార్ కార్డు** (eKYC కోసం తప్పనిసరి)",
-        "2. **భూమి యాజమాన్య పత్రాలు** (పట్టాదారు పాస్ పుస్తకం / 1-B / RoR)",
-        "3. **ఆధార్‌తో లింక్ అయిన బ్యాంక్ ఖాతా** వివరాలు",
-        "4. **ఆధార్‌తో లింక్ అయిన మొబైల్ నంబర్**",
-        "",
-        "⚠️ **ముఖ్య గమనిక:** ఇది ప్రాథమిక సమాచార మార్గదర్శకత్వం మాత్రమే. తుది ఆమోదం మీ స్థానిక వ్యవసాయ/రెవెన్యూ అధికారుల రికార్డుల పరిశీలన మరియు అధికారిక పోర్టల్‌లో eKYC పూర్తి చేయడంపై ఆధారపడి ఉంటుంది.",
-      ].join("\n");
-
-      return {
-        status: "eligibility_result",
-        message: lang === "te" ? msgTe : msgEn,
-        eligibilityState: null,
-        primaryScheme: scheme,
-      };
+      return positiveEligibilityResult(facts, lang, scheme);
     }
 
     // Clarification needed
@@ -734,7 +1295,7 @@ function handlePmkisanEligibility(userMessage, step, lang = "en", scheme, preAns
     return {
       status: "eligibility_question",
       message: lang === "te" ? clarifyTe : clarifyEn,
-      eligibilityState: { schemeId: "pm-kisan", step: "exclusions" },
+      eligibilityState: { schemeId: scheme?.id || "", step: "exclusions" },
       primaryScheme: scheme,
     };
   }
@@ -798,10 +1359,10 @@ export async function queryAssistant(userMessage, lang = "en", context = {}) {
 
   // Flow state is preserved across chit-chat and advanced/cleared otherwise.
   const keepState = context?.eligibilityState || null;
-  const activeElig =
-    context?.eligibilityState && context.eligibilityState.schemeId === "pm-kisan"
-      ? context.eligibilityState
-      : null;
+  // Any active flow is resolved by the scheme id stored in its own state. No
+  // scheme is assumed here: the interview only runs while that record still
+  // carries the criteria it asks about.
+  const activeElig = keepState?.schemeId ? keepState : null;
 
   if (!text) {
     return {
@@ -822,23 +1383,28 @@ export async function queryAssistant(userMessage, lang = "en", context = {}) {
   //    Handled rule-based, never by Gemini.
   if (activeElig) {
     const stripped = stripLeadingChitChat(text); // "hello yes" -> "yes"
-    const answer = classifyEligibilityAnswer(stripped, activeElig.step);
-    const pmKisanScheme = allSchemes.find((s) => s.id === "pm-kisan");
+    const flowScheme = allSchemes.find((s) => s.id === activeElig.schemeId) || null;
 
-    if (answer) {
-      return handlePmkisanEligibility(stripped, activeElig.step, lang, pmKisanScheme, answer);
-    }
+    // Every question is rendered from the flow's record; without it the flow
+    // cannot continue and the message falls through to normal handling.
+    if (flowScheme) {
+      const answer = classifyEligibilityAnswer(stripped, activeElig.step);
 
-    // Not a recognized answer. Chit-chat keeps the flow; a scheme/topic question
-    // is answered and ends the flow (handled below); anything else is an
-    // unrecognized reply to the current question → re-ask it.
-    const isChat = detectConversationalIntent(text);
-    const isSchemeQuestion =
-      Boolean(findBestSchemeMatch(text, allSchemes, lang)) ||
-      isContextualFollowUp(text) ||
-      isEligibilityDecisionQuery(text);
-    if (!isChat && !isSchemeQuestion) {
-      return handlePmkisanEligibility(text, activeElig.step, lang, pmKisanScheme);
+      if (answer) {
+        return handleEligibilityScreening(stripped, activeElig.step, lang, flowScheme, answer);
+      }
+
+      // Not a recognized answer. Chit-chat keeps the flow; a scheme/topic
+      // question is answered and ends the flow (handled below); anything else is
+      // an unrecognized reply to the current question → re-ask it.
+      const isChat = detectConversationalIntent(text);
+      const isSchemeQuestion =
+        Boolean(findBestSchemeMatch(text, allSchemes, lang)) ||
+        isContextualFollowUp(text) ||
+        isEligibilityDecisionQuery(text);
+      if (!isChat && !isSchemeQuestion) {
+        return handleEligibilityScreening(text, activeElig.step, lang, flowScheme);
+      }
     }
   }
 
@@ -868,11 +1434,12 @@ export async function queryAssistant(userMessage, lang = "en", context = {}) {
   }
 
   // 5. Start the eligibility flow on an explicit first-person decision query
-  //    ("Am I eligible for PM-KISAN?", "nenu eligible aa?"). Informational
-  //    queries ("What are the eligibility criteria?", "can I apply?") fall
-  //    through to the info paths instead.
-  if (isEligibilityDecisionQuery(text) && topMatch && topMatch.id === "pm-kisan") {
-    return handlePmkisanEligibility(text, "start", lang, topMatch);
+  //    ("Am I eligible for PM-KISAN?", "nenu eligible aa?"). Only schemes with a
+  //    working, record-backed screening flow qualify — the flow itself contains
+  //    no scheme facts. Informational queries ("What are the eligibility
+  //    criteria?", "can I apply?") fall through to the info paths instead.
+  if (isEligibilityDecisionQuery(text) && canScreenEligibility(topMatch)) {
+    return handleEligibilityScreening(text, "start", lang, topMatch);
   }
 
   // 3. TRY GEMINI via /api/chat — primary path
@@ -1029,9 +1596,17 @@ export async function queryAssistant(userMessage, lang = "en", context = {}) {
       "*(గమనిక: ఇది ప్రాథమిక సమాచారం మాత్రమే. అధికారిక నిర్ణయం కోసం సంబంధిత విభాగాన్ని సంప్రదించండి.)*",
     ].join("\n");
 
+    // Honest capability note: only schemes with a working screening flow can be
+    // interviewed step by step; every other scheme gets its record's criteria.
+    const screeningNote = canScreenEligibility(topMatch)
+      ? ""
+      : lang === "te"
+        ? "\n\n*(దశలవారీ అర్హత తనిఖీ ప్రస్తుతం పీఎం-కిసాన్ కోసం మాత్రమే అందుబాటులో ఉంది. పై నిబంధనలు ఈ పథకం ధృవీకరించిన రికార్డు నుండి తీసుకోబడ్డాయి.)*"
+        : "\n\n*(Step-by-step eligibility screening is currently available for PM-KISAN only. The criteria above come from this scheme's verified record.)*";
+
     return {
       status: "found",
-      message: lang === "te" ? eligMsgTe : eligMsgEn,
+      message: (lang === "te" ? eligMsgTe : eligMsgEn) + screeningNote,
       primaryScheme: topMatch,
       matchedSchemes: [topMatch],
     };
@@ -1112,36 +1687,9 @@ export async function queryAssistant(userMessage, lang = "en", context = {}) {
   }
 
   // Query: General Overview (e.g. "Tell me about PM-KISAN")
-  const benefitsList = (langData.benefits || []).slice(0, 3).map((b) => `• ${cleanText(b)}`).join("\n");
-  const eligSummary = (langData.eligibility || []).slice(0, 3).map((e) => `• ${cleanText(e)}`).join("\n");
-
-  const overviewEn = [
-    `### ${langData.name}`,
-    "",
-    cleanText(langData.shortDescription) || "Verified government welfare scheme for farmers.",
-    "",
-    "### Core Benefits:",
-    benefitsList || "• Information not available in verified record.",
-    "",
-    "### Key Eligibility:",
-    eligSummary || "• Information not available in verified record.",
-  ].join("\n");
-
-  const overviewTe = [
-    `### ${langData.name}`,
-    "",
-    cleanText(langData.shortDescription) || "రైతుల సంక్షేమం కోసం ప్రభుత్వం అందించే పథకం.",
-    "",
-    "### ముఖ్య ప్రయోజనాలు:",
-    benefitsList || "• వివరాలు అందుబాటులో లేవు.",
-    "",
-    "### ముఖ్య అర్హతలు:",
-    eligSummary || "• వివరాలు అందుబాటులో లేవు.",
-  ].join("\n");
-
   return {
     status: "found",
-    message: lang === "te" ? overviewTe : overviewEn,
+    message: buildSchemeOverview(topMatch, lang),
     primaryScheme: topMatch,
     matchedSchemes: [topMatch],
   };

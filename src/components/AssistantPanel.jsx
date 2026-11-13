@@ -4,19 +4,21 @@ import MarkdownRenderer from "./MarkdownRenderer";
 import useSpeechRecognition from "../hooks/useSpeechRecognition";
 import MicButton, { VoiceStatus } from "./MicButton";
 
-// Example questions shown as chips in the reference design
+// Example questions shown as chips in the reference design.
+// Deliberately mixed across schemes and question types (overview, documents,
+// eligibility, application) so no single scheme is presented as the default.
 const EXAMPLE_QUESTIONS = {
   en: [
     "Tell me about PM-KISAN",
     "What documents are required for crop insurance?",
-    "Am I eligible for PM-KISAN?",
-    "How to register a grievance?",
+    "What are the eligibility criteria for crop insurance?",
+    "How do I get a crop loan from PACS?",
   ],
   te: [
     "పీఎం-కిసాన్ గురించి చెప్పండి",
     "పంట బీమాకు అవసరమైన పత్రాలు ఏమిటి?",
-    "పీఎం కిసాన్‌కు నేను అర్హుడినా?",
-    "ఫిర్యాదు ఎలా నమోదు చేయాలి?",
+    "పంట బీమా అర్హత నిబంధనలు ఏమిటి?",
+    "PACS నుండి పంట రుణం ఎలా పొందాలి?",
   ],
 };
 
